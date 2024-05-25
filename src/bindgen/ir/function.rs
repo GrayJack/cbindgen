@@ -49,6 +49,14 @@ impl Function {
     ) -> Result<Function, String> {
         let mut args = sig.inputs.iter().try_skip_map(|x| x.as_argument())?;
 
+        if let Some(var) = sig.variadic.as_ref() {
+            let arg = var.as_argument()?;
+
+            if let Some(arg) = arg {
+                args.push(arg);
+            }
+        }
+
         let (mut ret, never_return) = Type::load_from_output(&sig.output)?;
 
         if let Some(self_path) = self_type_path {
@@ -218,19 +226,25 @@ trait SynFnArgHelpers {
     fn as_argument(&self) -> Result<Option<FunctionArgument>, String>;
 }
 
-fn gen_self_type(receiver: &syn::Receiver) -> Type {
-    let self_ty = Type::Path(GenericPath::self_path());
+fn gen_self_type(receiver: &syn::Receiver) -> Result<Type, String> {
+    let mut self_ty = Type::Path(GenericPath::self_path());
+
+    // Custom self type
+    if receiver.colon_token.is_some() {
+        self_ty = Type::load(receiver.ty.as_ref())?.unwrap_or(self_ty);
+    }
+
     if receiver.reference.is_none() {
-        return self_ty;
+        return Ok(self_ty);
     }
 
     let is_const = receiver.mutability.is_none();
-    Type::Ptr {
+    Ok(Type::Ptr {
         ty: Box::new(self_ty),
         is_const,
         is_nullable: false,
         is_ref: false,
-    }
+    })
 }
 
 impl SynFnArgHelpers for syn::FnArg {
@@ -266,9 +280,33 @@ impl SynFnArgHelpers for syn::FnArg {
             }
             syn::FnArg::Receiver(ref receiver) => Ok(Some(FunctionArgument {
                 name: Some("self".to_string()),
-                ty: gen_self_type(receiver),
+                ty: gen_self_type(receiver)?,
                 array_length: None,
             })),
         }
+    }
+}
+
+impl SynFnArgHelpers for syn::Variadic {
+    fn as_argument(&self) -> Result<Option<FunctionArgument>, String> {
+        let pat = self.pat.clone().map(|p| p.0);
+        let name = match pat.as_deref() {
+            Some(syn::Pat::Wild(..)) => None,
+            Some(syn::Pat::Ident(syn::PatIdent { ref ident, .. })) => {
+                Some(ident.unraw().to_string())
+            }
+            _ => {
+                return Err(format!(
+                    "Parameter has an unsupported argument name: {:?}",
+                    pat
+                ))
+            }
+        };
+
+        Ok(Some(FunctionArgument {
+            name,
+            ty: Type::Primitive(super::PrimitiveType::VaList),
+            array_length: None,
+        }))
     }
 }
